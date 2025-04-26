@@ -3,7 +3,7 @@
 
 ## Description: 📰
  
-Here you will find a tsv file (“Protein_abundance.tsv”) that contains protein abundance measured by label-free mass-spectrometry for chronic lymphocytic leukemia (CLL) patient samples. You will also find an excel table (“sampleAnnotation.xls”) that contains some basic annotations for those samples. Your task is to process the protein abundance dataset; assess its quality and identify protein markers for prognosis. You also need to write a report, preferably in Rmarkdown or Jupyter Notebook format, to present your analysis results.
+Here you will find a tsv file (“Protein_abundance.tsv”) that contains protein abundance measured by label-free mass-spectrometry for chronic lymphocytic leukemia (CLL) patient samples. You will also find an excel table (“sampleAnnotation.txt”) that contains some basic annotations for those samples. Your task is to process the protein abundance dataset; assess its quality and identify protein markers for prognosis. You also need to write a report, preferably in Rmarkdown or Jupyter Notebook format, to present your analysis results.
  
 ## Specific tasks:
  
