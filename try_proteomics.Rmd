@@ -1,0 +1,402 @@
+---
+title: "Try Proteomics Task"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment details
+
+**Input**:
+
+1. protein abundance measured by label-free mass-spectrometry for chronic lymphocytic     leukemia (CLL) patient samples
+
+2. basic annotations for those samples.
+
+**To do**:
+
+1. to process the protein abundance dataset and assess its quality
+2. to identify protein markers for prognosis
+3. write a report, preferably to present your analysis results to your potential future dry-lab or wet-lab collaborators
+
+**Specific tasks:**
+ 
+1. **Data processing**: The protein abundance in the tsv file is not normalized and has missing values, which is very common in the data table you will get from a proteomic facility. You need to use a proper way to normalize the protein abundance and deal with missing values.
+
+2. **Quality assessment**: The protein abundance measurement can often be influenced by technical factors, such as batch effect, operators, total protein concentrations, and free thaw cycles of the cells. Those technical factors could potentially act as confounders for downstream analysis. In the sample annotation table, you will find the technical factors and you need to evaluate whether they will confound downstream analysis.
+
+
+3. **Identify protein markers for prognosis**: in the sample annotation file, you will find three columns that contain the clinical information, which can be used to estimate the overall survival, of the CLL patients. You need to select proteins whose expression can be used to predict the overall survival of those patients using a proper statistical model. You may also do an enrichment analysis to see which pathway is potentially related to clinical outcome.
+
+
+
+## Loading required packages
+
+The installation of these packages can take quite a bit of time. For simplicity of the report, I am not including installation codes of each of these packages. Ideally, I can make a container that has all these packages and use that container on HPC / cloud etc. to maintain reproducibility.
+
+```{r load_packages, message=FALSE, warning=FALSE, paged.print=TRUE}
+
+library("xlsx")               # For reading Excel files
+library("preprocessCore")     # For quantile normalization
+library("msImpute")           # For missing data imputation in mass spectrometry-based proteomics
+library("survival")           # For survival analysis
+library("survminer")          # For visualization of survival analysis
+library("RegParallel")        # For parallelized regression analysis
+library("stringr")            # For advanced string manipulation
+library("org.Hs.eg.db")       # For gene annotation (human genome database)
+library("ReactomePA")         # For pathway enrichment analysis using Reactome
+library("pathfindR")          # For pathway enrichment analysis
+
+```
+
+## Loading the input data
+
+The protein abundance files and metadata were loaded into R environment.
+
+
+```{r input_data}
+
+setwd("C:/Documents/personal/task_proteomics/")
+
+
+#load the input data
+prot_abun=read.csv("Protein_abundance.tsv",
+                   sep="\t", 
+                   stringsAsFactors = F, 
+                   check.names = F,
+                   row.names = 1)
+
+metadata=read.xlsx(file = "sampleAnnotation.xls",
+                   sheetIndex = 1)
+
+```
+
+### Basic checks and queries on input data
+
+```{r basic_checks}
+
+print(paste0("Percentage missing=",round(100*(sum(is.na(prot_abun))/(nrow(prot_abun)*ncol(prot_abun))),2), " %"))
+
+#dimentions
+dim(prot_abun)
+dim(metadata)
+
+print("Metadtaa has 1 sample extra")
+
+missing_sample=metadata$sample.ID[!metadata$sample.ID %in% colnames(prot_abun)]
+
+#check the metadata of missing sample
+metadata[metadata$sample.ID==missing_sample,]
+
+print("most of metadata from missing sample is not available")
+
+#create a new metadata removing the sample without protein data
+
+metadata_filter=metadata[metadata$sample.ID %in% colnames(prot_abun),]
+row.names(metadata_filter)=metadata_filter$sample.ID
+metadata_filter$sample.ID=NULL
+
+#order the protein abundance columns to match the order of metadata
+prot_abun_order=prot_abun[,row.names(metadata_filter)]
+
+```
+
+
+## Data Processing
+
+```{r Data_processing}
+
+#quantile normalization 
+qn_pa=normalize.quantiles(as.matrix(prot_abun_order))
+
+row.names(qn_pa)=row.names(prot_abun_order)
+colnames(qn_pa)=colnames(prot_abun_order)
+
+#log scaling
+log_qn_pa=log2(qn_pa)
+
+#checking for proteins which are missing for most of the samples
+max(rowSums( is.na(log_qn_pa)))
+table(rowSums( is.na(log_qn_pa)))
+
+#removed features
+row.names(log_qn_pa[rowSums( is.na(log_qn_pa))>=46,])
+
+#atleast 4 samples should be non-NA as required by MSImpute package, which is why 45 value was chosen as a filter
+filtered= log_qn_pa[ rowSums( is.na(log_qn_pa)) <= 45, ]
+
+
+library(msImpute)
+imputed=msImpute(filtered,method = "v1") #v1 method tackels MAR type missingness
+
+#to get MNAR type missing values, we need to specify a group variable
+#typically designed for treated / untreated or WT/mutant kind of groupings where one group may not express proteins at detectable levels
+
+imputed_mnar=msImpute(filtered,group = as.character(metadata_filter$died))
+
+#checking the lowest values of log2(abundance) before and after imputing
+min(na.omit(prot_abun_order))
+min(na.omit(filtered))
+min(imputed_mnar)
+min(imputed)
+```
+
+lowest value is also quite high suggesting strong signals and no need for MNAR. Here onwards, I have chosen to use data imputed with v1 method. Also, I am not sure if using "died" as the group variable makes sense for MNAR missingness.
+
+
+## Quality Assessment
+
+### prepare cox ph data
+
+Joining the protein abundance data for all samples witht he sample metadata for cox regression modelling purposes.
+
+Checking the class of each of the technical variable. Re-factoring the sample metadata.
+
+For operator variable, there wasa  single sample of type "MG/FMA", to have some meaningful comparison, I changed it to "MG".
+
+```{r prepare_coxdata}
+
+coxdata=cbind(t(imputed),metadata_filter)
+
+#adding the time column
+coxdata$time=as.numeric(coxdata$last.known.alive-coxdata$date.of.diagnosis)
+
+class(coxdata$total.protein.concentration)
+coxdata$total.protein.concentration=as.numeric(coxdata$total.protein.concentration)
+
+class(coxdata$freeThawCycle)
+coxdata$freeThawCycle=as.factor(coxdata$freeThawCycle)
+table(coxdata$freeThawCycle)
+
+class(coxdata$batch)
+table(coxdata$batch)
+coxdata[coxdata$batch=="0","batch"]="7"
+coxdata$batch=as.factor(coxdata$batch)
+
+class(coxdata$operator)
+table(coxdata$operator)
+coxdata[coxdata$operator=="MG/FMA","operator"]="MG"
+coxdata$operator=as.factor(coxdata$operator)
+
+
+class(coxdata$died)
+coxdata$event=1
+coxdata[coxdata$died==TRUE,"event"]=2
+
+```
+
+
+### Coxph regression with technical variables to assess their impact on survival. 
+
+```{r confounder_cox_summary}
+
+batch_cox <- coxph(Surv(time,event) ~ batch, data = coxdata)
+op_cox <- coxph(Surv(time,event) ~ operator, data = coxdata)
+thaw_cox <- coxph(Surv(time,event) ~ freeThawCycle, data = coxdata)
+conc_cox <- coxph(Surv(time,event) ~ total.protein.concentration, data = coxdata)
+
+
+cox_summary=function(x){ 
+  x <- summary(x)
+  p.value<-signif(x$wald["pvalue"], digits=2)
+  wald.test<-signif(x$wald["test"], digits=2)
+  beta<-signif(x$coef[1], digits=2);#coeficient beta
+  HR <-signif(x$coef[2], digits=2);#exp(beta)
+  
+  res<-c(beta, HR, wald.test, p.value)
+  names(res)<-c("beta", "HR ", "wald.test", 
+                "p.value")
+  return(res)
+  
+}
+
+
+univariate_summary=data.frame(rbind(cox_summary(op_cox),cox_summary(thaw_cox),cox_summary(conc_cox),cox_summary(batch_cox)),row.names = c("operator","thaw","protein concentration","batch"))
+
+kable(univariate_summary)
+
+
+```
+
+None of the technical variables have significat effect on the survival as observed from the p values. 
+
+### survival plots of confounders 
+
+The above cox regression can be visualized in a kaplan-mier survival plot. 
+
+```{r confounder_surv_plot, echo=TRUE}
+
+ggsurvplot(survfit(op_cox),data =coxdata,conf.int = FALSE)
+new_df=data.frame("operator"=c("CB","MG"),"freeThawCycle"=c("0"),"total.protein.concentration"=mean(coxdata$total.protein.concentration),"batch"="3")
+fit=survfit(op_cox,newdata = new_df)
+op_survplot=ggsurvplot(fit, legend.labs=c("CB","MG"),data = coxdata,ggtheme = theme_minimal(),conf.int = FALSE,pval = TRUE)
+
+op_survplot
+
+ggsurvplot(survfit(thaw_cox),data =coxdata,conf.int = FALSE)
+new_df=data.frame("operator"=c("CB"),"freeThawCycle"=c("0","1"),"total.protein.concentration"=mean(coxdata$total.protein.concentration),"batch"="3")
+fit=survfit(thaw_cox,newdata = new_df)
+thaw_survplot=ggsurvplot(fit, legend.labs=c("0","1"),data = coxdata,ggtheme = theme_minimal(),conf.int = FALSE,pval = TRUE)
+
+thaw_survplot
+
+```
+#### conclusion: technical factor are not having effect on survival modelling
+
+
+### PCA analysis to assess if the technical factors are having an impact on the abundances
+
+Here, we try to see if the technical factors confound the protein values to an extent that we can observe data separating based on these technical factors into different clusters. 
+
+```{r pca}
+t_imp=t(imputed)
+pca_imp=prcomp(t_imp,scale. = T,center = T)
+
+autoplot(pca_imp, data=coxdata,colour='batch')
+autoplot(pca_imp, data=coxdata,colour='died')
+autoplot(pca_imp, data=coxdata,colour='freeThawCycle')
+autoplot(pca_imp, data=coxdata,colour='total.protein.concentration')
+autoplot(pca_imp, data=coxdata,colour='operator')
+
+
+```
+
+
+#### conclusion from the PCA plots: No obvious cluster separation observed in samples based on technical factors
+
+
+## Protein Markers for Prognosis
+
+```{r protein_markers}
+
+#Removing the technical factor columns. Cleaning up to just keep event, time and abundances.
+
+colnames(coxdata)[dim(imputed)[1]:dim(coxdata)[2]]
+
+protein_coxdata=coxdata[,! colnames(coxdata) %in% c("batch","operator","total.protein.concentration","conc","died","last.known.alive","date.of.diagnosis","freeThawCycle")]
+
+
+#had to apply make.names to features because next line was throwing errors with default name due to some character encoding
+colnames(protein_coxdata)=make.names(colnames(protein_coxdata))
+
+
+#following function would do cox regression for each protein feature in a parallelized manner
+
+prognosis <- RegParallel(
+  data = protein_coxdata,
+  formula = 'Surv(time, event) ~ [*]',
+  FUN = function(formula, data)
+    coxph(formula = formula,
+          data = data,
+          ties = 'breslow',
+          singular.ok = TRUE),
+  FUNtype = 'coxph',
+  variables = colnames(protein_coxdata)[1:(ncol(protein_coxdata)-2)],
+  blocksize = 200,
+  cores = 3,
+  nestedParallel = FALSE,
+  conflevel = 95)
+
+prognosis2=prognosis[!is.na(prognosis$P),]
+prognosis2
+
+prognosis2 <- prognosis2[order(prognosis2$LogRank, decreasing = FALSE),]
+signif_feature <- subset(prognosis2, LogRank < 0.01)
+signif_feature2 <- subset(prognosis2, LogRank < 0.05)
+
+kable(signif_feature2)
+
+prognostic_proteins <- str_split_fixed(signif_feature2$Variable,pattern = "\\.",3)[,2]
+
+prognostic_gene     <- str_remove(str_split_fixed(signif_feature2$Variable,pattern = "\\.",3)[,3],"_HUMAN")
+
+print(prognostic_gene)
+
+```
+
+### Example survival plot with one of the significant proteins
+
+```{r RUXE_survplot}
+survplotdata=protein_coxdata[,c("time","event",signif_feature2$Variable[1])]
+
+colnames(survplotdata) <- c('time', 'event','RUXE')
+range(survplotdata$RUXE)
+median(survplotdata$RUXE)
+
+highExpr <- 16
+lowExpr <- 13
+survplotdata$RUXE <- ifelse(survplotdata$RUXE >= highExpr, 'High',
+                              ifelse(survplotdata$RUXE <= lowExpr, 'Low', 'Mid'))
+
+survplotdata$RUXE <- factor(survplotdata$RUXE,levels = c('Mid', 'Low', 'High'))
+
+ggsurvplot(survfit(Surv(time, event) ~ RUXE,
+                   data = survplotdata),
+           data = survplotdata,
+           risk.table = F,
+           pval = TRUE,
+           break.time.by = 50,
+           ggtheme = theme_minimal())
+
+
+```
+Here we can see that having low expression of RUXE have significant poor prognosis.
+
+
+## Pathway Enrichment
+
+### Using ReactomePA 
+
+ReactomePA package requires input genelist in Entrez ID.
+
+```{r Reactome}
+hs <- org.Hs.eg.db
+my.symbols <- c(prognostic_gene)
+entrez_map=select(hs, 
+                  keys = my.symbols,
+                  columns = c("ENTREZID", "SYMBOL"),
+                  keytype = "SYMBOL")
+
+prognostic_gene_entrez=entrez_map[!is.na(entrez_map$ENTREZID),2]
+
+x <- enrichPathway(gene=prognostic_gene_entrez,
+                   pvalueCutoff=0.2,
+                   qvalueCutoff=0.2,
+                   readable=T)
+
+reactome_pa_res=x@result
+
+kable(reactome_pa_res[1:15,c(2,5,6,8)])
+
+
+```
+
+
+### Using pathfindR
+```{r pathfindR}
+
+pfr_input=signif_feature2[,c(1,3,9)]
+pfr_input$Variable=str_remove(str_split_fixed(pfr_input$Variable,pattern = "\\.",3)[,3],"_HUMAN")
+colnames(pfr_input)=c("Gene.symbol","logFC","adj.P.Val")
+
+pfr_out <- run_pathfindR(pfr_input)
+
+```
+
+Pathways appearing are very relavant to Chronic lymphocytic leukemia (CLL) 
+
+
+## References:
+
+Many many publications were considered for their algorithms and approach towards imputation and modelling, but following resources were of most help.
+
+1. https://www.sciencedirect.com/science/article/pii/S1535947623000683#bib19
+2. https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6944043/
+3. https://www.biostars.org/p/344233/
+4. https://bioconductor.org/packages/release/data/experiment/vignettes/RegParallel/inst/doc/RegParallel.html
+5. https://cran.r-project.org/web/packages/pathfindR/vignettes/intro_vignette.html
+6. https://bmcbioinformatics.biomedcentral.com/articles/10.1186/s12859-023-05360-7
+7. http://www.sthda.com/english/wiki/cox-proportional-hazards-model
+
