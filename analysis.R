@@ -20,7 +20,7 @@ prot_abun = read.csv("Protein_abundance.tsv",
                      check.names = F, 
                      row.names = 1) # Protein abundance dataset, rows represent proteins
 
-metadata = read.xlsx(file = "sampleAnnotation.txt", 
+metadata = read.xlsx(file = "sampleAnnotation.xls", 
                      sheetIndex = 1) # Metadata for the samples
 
 # Basic checks on the data
