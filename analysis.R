@@ -11,17 +11,16 @@ library("ReactomePA")         # For pathway enrichment analysis using Reactome
 library("pathfindR")          # For pathway enrichment analysis
 
 # Set the working directory and list files in the specified folder
-setwd("C://Users/kptl632/OneDrive - AZCollaboration/Documents/personal/task_dfkz/")
-list.files("Bioinformatic_task/") # Listing files in the 'Bioinformatic_task' directory
+setwd("C:/Documents/personal/task_proteomics/")
 
 # Load the input data
-prot_abun = read.csv("Bioinformatic_task/Protein_abundance.tsv", 
+prot_abun = read.csv("Protein_abundance.tsv", 
                      sep = "\t", 
                      stringsAsFactors = F, 
                      check.names = F, 
                      row.names = 1) # Protein abundance dataset, rows represent proteins
 
-metadata = read.xlsx(file = "Bioinformatic_task/sampleAnnotation.xls", 
+metadata = read.xlsx(file = "sampleAnnotation.txt", 
                      sheetIndex = 1) # Metadata for the samples
 
 # Basic checks on the data
